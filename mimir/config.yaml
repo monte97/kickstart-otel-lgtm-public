@@ -1,0 +1,46 @@
+# Single-binary mode for dev/staging
+# Do NOT use in production as-is
+
+multitenancy_enabled: false
+
+blocks_storage:
+  backend: filesystem
+  filesystem:
+    dir: /mimir/data/tsdb
+  bucket_store:
+    sync_dir: /mimir/tsdb-sync
+
+compactor:
+  data_dir: /mimir/compactor
+
+distributor:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+ingester:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+    replication_factor: 1
+
+ruler_storage:
+  backend: filesystem
+  filesystem:
+    dir: /mimir/rules
+
+limits:
+  # Storage degli exemplar (default 0 = disabilitato). Senza questo Mimir scarta
+  # gli exemplar che Tempo invia (metrics_generator: send_exemplars: true),
+  # impedendo il salto metrica→traccia dai pannelli (es. span-metrics → trace).
+  max_global_exemplars_per_user: 100000
+
+server:
+  http_listen_port: 9009
+  log_level: warn
+
+store_gateway:
+  sharding_ring:
+    replication_factor: 1

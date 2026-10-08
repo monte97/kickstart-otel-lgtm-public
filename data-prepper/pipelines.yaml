@@ -1,0 +1,34 @@
+entry-pipeline:
+  delay: 100
+  source:
+    otel_trace_source:
+      ssl: false
+  buffer:
+    bounded_blocking:
+  sink:
+    - pipeline:
+        name: "raw-trace-pipeline"
+    - pipeline:
+        name: "service-map-pipeline"
+
+raw-trace-pipeline:
+  source:
+    pipeline:
+      name: "entry-pipeline"
+  processor:
+    - otel_traces:
+  sink:
+    - opensearch:
+        hosts: ["http://opensearch:9200"]
+        index_type: trace-analytics-raw
+
+service-map-pipeline:
+  source:
+    pipeline:
+      name: "entry-pipeline"
+  processor:
+    - service_map:
+  sink:
+    - opensearch:
+        hosts: ["http://opensearch:9200"]
+        index_type: trace-analytics-service-map

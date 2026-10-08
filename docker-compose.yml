@@ -1,0 +1,225 @@
+name: kickstart-otel-lgtm
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+networks:
+  observability:
+    driver: bridge
+
+volumes:
+  grafana-data:
+  loki-data:
+  tempo-data:
+  mimir-data:
+
+services:
+  # ─── OpenTelemetry Collector ────────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.149.0
+    container_name: otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otel/config.yaml"]
+    user: "0:0"  # root — needed to read /var/run/docker.sock for docker_stats receiver
+    environment:
+      # Policy di tail sampling (le legge la config del collector). Il default
+      # tiene il 20% delle trace sane; portarlo a 100 rende ogni trace ritrovabile,
+      # che è ciò che serve a un demo o a un test che asserisce su una trace precisa.
+      - TRACE_SAMPLING_RATE=${TRACE_SAMPLING_RATE:-20}
+      - TRACE_LATENCY_THRESHOLD_MS=${TRACE_LATENCY_THRESHOLD_MS:-2000}
+    volumes:
+      - ./otel-collector/${OTELCOL_CONFIG:-config.yaml}:/etc/otel/config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro  # per docker_stats receiver
+    ports:
+      - "${OTELCOL_GRPC_PORT:-14317}:4317"     # OTLP gRPC
+      - "${OTELCOL_HTTP_PORT:-14318}:4318"     # OTLP HTTP
+      - "${OTELCOL_HEALTH_PORT:-13133}:13133"  # health check
+      - "${OTELCOL_ZPAGES_PORT:-15679}:55679"  # zPages (debug)
+    networks:
+      - observability
+    depends_on:
+      loki:
+        condition: service_started
+      tempo:
+        condition: service_started
+      mimir:
+        condition: service_started
+    healthcheck:
+      disable: true
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 600m
+
+  # ─── Grafana ────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:12.4.2
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor metricsSummary
+      - GF_UNIFIED_ALERTING_STATE_HISTORY_ENABLED=true
+      - GF_UNIFIED_ALERTING_STATE_HISTORY_BACKEND=loki
+      - GF_UNIFIED_ALERTING_STATE_HISTORY_LOKI_REMOTE_URL=http://loki:3100
+      - GF_UNIFIED_ALERTING_STATE_HISTORY_LOKI_TENANT_ID=1
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana-dashboards/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana-dashboards/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana-dashboards/provisioning/alerting:/etc/grafana/provisioning/alerting:ro
+      - ./grafana-dashboards/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    networks:
+      - observability
+    depends_on:
+      loki:
+        condition: service_started
+      tempo:
+        condition: service_started
+      mimir:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256m
+
+  # ─── Loki ───────────────────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:3.7.1
+    container_name: loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/config.yaml", "-config.expand-env=true"]
+    volumes:
+      - ./loki/config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+    networks:
+      - observability
+    healthcheck:
+      disable: true
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512m
+
+  # ─── Tempo ──────────────────────────────────────────────────────────────────
+  tempo:
+    image: grafana/tempo:2.10.4
+    container_name: tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    volumes:
+      - ./tempo/config.yaml:/etc/tempo/config.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "${TEMPO_PORT:-3200}:3200"   # Tempo query API (Grafana usa questa)
+      # 4317 OTLP gRPC ingest è interno alla rete, non esposto all'host
+    networks:
+      - observability
+    healthcheck:
+      disable: true
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512m
+
+  # ─── Mimir ──────────────────────────────────────────────────────────────────
+  mimir:
+    image: grafana/mimir:3.0.5
+    container_name: mimir
+    restart: unless-stopped
+    command: ["--config.file=/etc/mimir/config.yaml"]
+    volumes:
+      - ./mimir/config.yaml:/etc/mimir/config.yaml:ro
+      - mimir-data:/mimir
+    ports:
+      - "${MIMIR_PORT:-9009}:9009"
+    networks:
+      - observability
+    healthcheck:
+      disable: true
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512m
+
+  # ─── Node Exporter ──────────────────────────────────────────────────────────
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: node-exporter
+    restart: unless-stopped
+    command:
+      - '--path.rootfs=/host'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    pid: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      # Senza propagazione `rslave`: Docker Desktop (macOS/Windows) rifiuta di montare `/`
+      # come shared/slave e il container non parte, bloccando l'intero `up`. Il prezzo su
+      # Linux è che i filesystem montati sull'host *dopo* l'avvio non compaiono.
+      - /:/host:ro
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9100/metrics"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '0.10'
+          memory: 64m
+
+  # ─── Alertmanager ───────────────────────────────────────────────────────────
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    restart: unless-stopped
+    command: ["--config.file=/etc/alertmanager/config.yml"]
+    volumes:
+      - ./alertmanager/config.yml:/etc/alertmanager/config.yml:ro
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9093/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128m
